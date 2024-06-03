@@ -5,8 +5,11 @@ import joblib
 import numpy as np
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from utils.build_model import train_and_save_model
 
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
@@ -30,6 +33,14 @@ DB_NAME = os.getenv('DB_NAME')
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 novels_collection = db['novels']
+
+# Load novels data for TF-IDF
+novels_data = list(novels_collection.find({}, {"_id": 1, "name": 1}))
+
+# Create TF-IDF Vectorizer and fit it on novel names
+novel_names = [novel['name'] for novel in novels_data]
+vectorizer = TfidfVectorizer().fit(novel_names)
+tfidf_matrix = vectorizer.transform(novel_names)
 
 @app.route('/recommend', methods=['GET'])
 def recommend():
@@ -99,6 +110,22 @@ def recommend_based_on_novel():
     recommended_novels = [{'novel_id': int(novel_id), 'similarity_score': float(score)} for novel_id, score in top_novels]
 
     return jsonify(recommended_novels)
+
+@app.route('/search_novel', methods=['GET'])
+def search_novel():
+    query = request.args.get('query')
+    
+    if not query:
+        return jsonify({'error': 'Query is required'}), 400
+
+    query_tfidf = vectorizer.transform([query])
+    cosine_similarities = cosine_similarity(query_tfidf, tfidf_matrix).flatten()
+    top_n_indices = cosine_similarities.argsort()[-10:][::-1]
+    top_novels = [(novels_data[idx]['_id'], novels_data[idx]['name'], cosine_similarities[idx]) for idx in top_n_indices]
+
+    results = [{'novel_id': str(novel_id), 'name': name, 'similarity_score': float(score)} for novel_id, name, score in top_novels]
+
+    return jsonify(results)
 
 @app.route('/train', methods=['POST'])
 def train_model():
