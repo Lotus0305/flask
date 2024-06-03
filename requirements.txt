@@ -1,9 +1,12 @@
 flask
-gunicorn
+tensorflow
 joblib
 numpy
 pandas
 pymongo
 python-dotenv
-scikit-learn==1.4.1.post1
-tensorflow
+scikit-learn
+sentence-transformers
+torch
+nltk
+gunicorn
