@@ -1,4 +1,9 @@
 import os
+
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 from flask import Flask, request, jsonify
 import tensorflow as tf
 import joblib
@@ -12,7 +17,22 @@ from utils.build_model import train_and_save_model
 # Load environment variables
 load_dotenv()
 
+MONGO_URI = os.getenv('MONGO_URI')
+DB_NAME = os.getenv('DB_NAME')
+
+if not DB_NAME:
+    raise ValueError("DB_NAME environment variable is not set or empty")
+
 app = Flask(__name__)
+
+# Debugging prints
+print(f"MONGO_URI: {MONGO_URI}")
+print(f"DB_NAME: {DB_NAME}")
+
+# MongoDB configuration
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+novels_collection = db['novels']
 
 # Load encoders and model paths
 MODEL_DIR = 'models'
@@ -25,14 +45,6 @@ category_encoder = joblib.load(category_encoder_path)
 novel_encoder = joblib.load(novel_encoder_path)
 user_encoder = joblib.load(user_encoder_path)
 model = tf.keras.models.load_model(model_path)
-
-# MongoDB configuration
-MONGO_URI = os.getenv('MONGO_URI')
-DB_NAME = os.getenv('DB_NAME')
-
-client = MongoClient(MONGO_URI)
-db = client[DB_NAME]
-novels_collection = db['novels']
 
 # Load novels data for TF-IDF
 novels_data = list(novels_collection.find({}, {"_id": 1, "name": 1}))
@@ -138,4 +150,4 @@ def health_check():
     return jsonify({'status': 'up'}), 200
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)
