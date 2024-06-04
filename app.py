@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from utils.build_model import train_and_save_model
+from flask_cors import CORS
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +25,7 @@ if not DB_NAME:
     raise ValueError("DB_NAME environment variable is not set or empty")
 
 app = Flask(__name__)
-
+CORS(app)
 # Debugging prints
 print(f"MONGO_URI: {MONGO_URI}")
 print(f"DB_NAME: {DB_NAME}")
@@ -33,6 +34,7 @@ print(f"DB_NAME: {DB_NAME}")
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 novels_collection = db['novels']
+comments_collection = db['comments']
 
 # Load encoders and model paths
 MODEL_DIR = 'models'
@@ -68,8 +70,9 @@ def recommend():
 
     # Encode the user_id
     if user_id not in user_encoder.classes_:
-        return jsonify({'error': 'User ID not found'}), 404
-
+        account_data = comments_collection.find_one({}, {'_id': 0, 'account': 1})
+        user_id = account_data
+        # return jsonify({'error': 'User ID not found', 'account_data': user_id}), 404
     user_encoded = user_encoder.transform([user_id])[0]
 
     # Get all novels
