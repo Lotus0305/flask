@@ -2,21 +2,23 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Embedding, Input, Dense, Flatten, Concatenate, Multiply, Dropout, BatchNormalization, LeakyReLU
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from pymongo import MongoClient
-import joblib
+import json
 import os
 from dotenv import load_dotenv
+from sklearn.preprocessing import LabelEncoder
 
 load_dotenv()
 
+# Load environment variables
 MONGO_URI = os.getenv('MONGO_URI')
 DB_NAME = os.getenv('DB_NAME')
 
+# Connect to MongoDB
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 
@@ -24,9 +26,11 @@ comments_collection = db['comments']
 novels_collection = db['novels']
 
 def train_and_save_model():
+    # Load data from MongoDB
     comments = pd.DataFrame(list(comments_collection.find()))
     novels = pd.DataFrame(list(novels_collection.find()))
 
+    # Preprocess comments data
     comments = comments.rename(columns={
         '_id': 'commentId',
         'account': 'accountId',
@@ -36,6 +40,7 @@ def train_and_save_model():
         'content': 'content'
     })[['accountId', 'novelId', 'rating', 'commentId']]
 
+    # Preprocess novels data
     novels = novels.rename(columns={
         '_id': 'novelId',
         'name': 'name',
@@ -47,9 +52,11 @@ def train_and_save_model():
         'imageUrl': 'imageUrl'
     })[['novelId', 'name', 'category']]
 
+    # Drop missing values
     comments = comments.dropna(subset=['accountId', 'novelId', 'rating', 'commentId'])
     novels = novels.dropna(subset=['novelId', 'category'])
 
+    # Convert data types
     comments = comments.astype({
         'accountId': np.int64,
         'novelId': np.int64,
@@ -62,6 +69,7 @@ def train_and_save_model():
         'name': str
     })
 
+    # Label encoding
     user_encoder = LabelEncoder()
     novel_encoder = LabelEncoder()
     category_encoder = LabelEncoder()
@@ -70,6 +78,19 @@ def train_and_save_model():
     comments['novel'] = novel_encoder.fit_transform(comments['novelId'])
     novels['category'] = category_encoder.fit_transform(novels['category'])
 
+    # Tạo từ điển mã hóa và lưu trữ vào file JSON
+    user_id_to_label = {original_id: encoded_id for original_id, encoded_id in zip(comments['accountId'], comments['user'])}
+    novel_id_to_label = {original_id: encoded_id for original_id, encoded_id in zip(comments['novelId'], comments['novel'])}
+    category_id_to_label = {original_id: encoded_id for original_id, encoded_id in zip(novels['category'], novels['category'])}
+
+    with open('models/user_id_to_label.json', 'w') as f:
+        json.dump(user_id_to_label, f)
+    with open('models/novel_id_to_label.json', 'w') as f:
+        json.dump(novel_id_to_label, f)
+    with open('models/category_id_to_label.json', 'w') as f:
+        json.dump(category_id_to_label, f)
+
+    # Merge comments and novels data
     merge = pd.merge(novels, comments, on='novelId', how='left')
     merge = merge.dropna()
     merge = merge.astype({
@@ -83,6 +104,7 @@ def train_and_save_model():
         'name': str
     })
 
+    # Split data into training and testing sets
     train_data, test_data = train_test_split(merge, test_size=0.2, random_state=42)
 
     train_users = train_data['user'].values
@@ -95,6 +117,7 @@ def train_and_save_model():
     test_categories = test_data['category'].values
     test_ratings = test_data['rating'].values
 
+    # Model parameters
     embedding_dim = 64
     dropout_rate = 0.4
     dense_units = 64
@@ -106,10 +129,12 @@ def train_and_save_model():
     num_novels = len(novel_encoder.classes_)
     num_categories = len(category_encoder.classes_)
 
+    # Model inputs
     user_input = Input(shape=(1,), dtype='int32', name='user_input')
     novel_input = Input(shape=(1,), dtype='int32', name='novel_input')
     category_input = Input(shape=(1,), dtype='int32', name='category_input')
 
+    # GMF part
     user_embedding_gmf = Embedding(input_dim=num_users, output_dim=embedding_dim, name='user_embedding_gmf')(user_input)
     novel_embedding_gmf = Embedding(input_dim=num_novels, output_dim=embedding_dim, name='novel_embedding_gmf')(novel_input)
     category_embedding_gmf = Embedding(input_dim=num_categories, output_dim=embedding_dim, name='category_embedding_gmf')(category_input)
@@ -120,6 +145,7 @@ def train_and_save_model():
 
     gmf = Multiply()([user_vec_gmf, novel_vec_gmf, category_vec_gmf])
 
+    # MLP part
     user_embedding_mlp = Embedding(input_dim=num_users, output_dim=embedding_dim, name='user_embedding_mlp')(user_input)
     novel_embedding_mlp = Embedding(input_dim=num_novels, output_dim=embedding_dim, name='novel_embedding_mlp')(novel_input)
     category_embedding_mlp = Embedding(input_dim=num_categories, output_dim=embedding_dim, name='category_embedding_mlp')(category_input)
@@ -129,45 +155,50 @@ def train_and_save_model():
     category_vec_mlp = Flatten()(category_embedding_mlp)
 
     mlp = Concatenate()([user_vec_mlp, novel_vec_mlp, category_vec_mlp])
-    mlp = Dense(dense_units, kernel_regularizer=regularization)(mlp)
-    mlp = LeakyReLU(negative_slope=0.1)(mlp)
+    mlp = Dense(units=dense_units, kernel_regularizer=regularization)(mlp)
+    mlp = LeakyReLU(alpha=0.01)(mlp)
     mlp = BatchNormalization()(mlp)
-    mlp = Dropout(dropout_rate)(mlp)
-    mlp = Dense(dense_units // 2, kernel_regularizer=regularization)(mlp)
-    mlp = LeakyReLU(negative_slope=0.1)(mlp)
+    mlp = Dropout(rate=dropout_rate)(mlp)
+    mlp = Dense(units=dense_units // 2, kernel_regularizer=regularization)(mlp)
+    mlp = LeakyReLU(alpha=0.01)(mlp)
     mlp = BatchNormalization()(mlp)
-    mlp = Dropout(dropout_rate)(mlp)
-    mlp = Dense(dense_units // 4, kernel_regularizer=regularization)(mlp)
-    mlp = LeakyReLU(negative_slope=0.1)(mlp)
+    mlp = Dropout(rate=dropout_rate)(mlp)
+    mlp = Dense(units=dense_units // 4, kernel_regularizer=regularization)(mlp)
+    mlp = LeakyReLU(alpha=0.01)(mlp)
     mlp = BatchNormalization()(mlp)
 
-    neumf = Concatenate()([gmf, mlp])
-    output = Dense(1)(neumf)
+    # Concatenate GMF and MLP parts
+    neu_mf = Concatenate()([gmf, mlp])
+    prediction = Dense(units=1, activation='relu', kernel_regularizer=regularization)(neu_mf)
 
-    model = Model(inputs=[user_input, novel_input, category_input], outputs=output)
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss='mean_squared_error', metrics=['mae', 'mape', tf.keras.metrics.RootMeanSquaredError()])
+    model = Model(inputs=[user_input, novel_input, category_input], outputs=prediction)
 
+    # Compile model
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss='mean_squared_error', metrics=['mean_squared_error'])
+
+    # Define callbacks
     early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=2, min_lr=0.00001)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
 
-    history = model.fit([train_users, train_novels, train_categories], train_ratings,
-                        batch_size=256, epochs=100, verbose=1,
-                        validation_data=([test_users, test_novels, test_categories], test_ratings),
-                        callbacks=[early_stopping, reduce_lr])
+    # Train model
+    history = model.fit(
+        [train_users, train_novels, train_categories],
+        train_ratings,
+        validation_split=0.1,
+        epochs=100,
+        batch_size=256,
+        callbacks=[early_stopping, reduce_lr]
+    )
 
-    model_dir = 'models'
-    os.makedirs(model_dir, exist_ok=True)
-    model.save(os.path.join(model_dir, 'recommendation_model.h5'))
-    joblib.dump(user_encoder, os.path.join(model_dir, 'user_encoder.pkl'))
-    joblib.dump(novel_encoder, os.path.join(model_dir, 'novel_encoder.pkl'))
-    joblib.dump(category_encoder, os.path.join(model_dir, 'category_encoder.pkl'))
+    # Save model
+    model.save('models/recommendation_model.h5')
+    print("Model saved successfully.")
 
-    eval_results = model.evaluate([test_users, test_novels, test_categories], test_ratings, verbose=1)
-    response = {
-        "Test Loss": eval_results[0],
-        "Test MAE": eval_results[1],
-        "Test MAPE": eval_results[2],
-        "Test RMSE": eval_results[3]
-    }
+    # Evaluate model
+    loss, mse = model.evaluate([test_users, test_novels, test_categories], test_ratings)
+    print(f'Test Mean Squared Error: {mse}')
+    
+    return mse
 
-    return response
+if __name__ == "__main__":
+    train_and_save_model()
