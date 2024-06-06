@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import tensorflow as tf
 import numpy as np
 import json
@@ -165,8 +165,11 @@ def train_model():
 def health_check():
     return jsonify({'status': 'Service is up and running'}), 200
 
-if __name__ == '__main__':
-    app.run(debug=False)
+@app.route('/')
+def index():
+  return render_template('index.html')
 
+if __name__ == '__main__':
+    app.run(port=5000)
 
 
