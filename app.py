@@ -1,6 +1,5 @@
 import os
 from flask import Flask, request, jsonify, render_template
-import tensorflow as tf
 import numpy as np
 import json
 from pymongo import MongoClient
@@ -15,12 +14,18 @@ from nltk.corpus import stopwords
 from utils.build_model import train_and_save_model
 from config.config import Config
 from flask_cors import CORS
+
+# Tắt oneDNN custom operations
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+import tensorflow as tf
+
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 app.config.from_object(Config)
 CORS(app)
+
 # MongoDB configuration
 client = MongoClient(app.config['MONGO_URI'])
 db = client[app.config['DB_NAME']]
@@ -38,7 +43,7 @@ with open(os.path.join(MODEL_DIR, 'category_id_to_label.json'), 'r') as file:
     category_id_to_label = json.load(file)
 
 model_path = os.path.join(MODEL_DIR, 'recommendation_model.h5')
-model = tf.keras.models.load_model(model_path)
+model = None
 
 # Load SentenceTransformer model
 sentence_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
@@ -105,8 +110,6 @@ def search_novel():
 def recommend():
     user_id = request.args.get('user_id')
     if not user_id:
-        return jsonify
-    if not user_id:
         return jsonify({'error': 'User ID is required'}), 400
     try:
         user_encoded = encode_id(user_id_to_label, user_id)
@@ -118,6 +121,10 @@ def recommend():
         user_id = account_data['account']
         user_encoded = encode_id(user_id_to_label, user_id)
 
+    global model
+    if model is None:
+        model = tf.keras.models.load_model(model_path)
+    
     all_novels = list(novel_id_to_label.keys())
     novel_array = np.array([encode_id(novel_id_to_label, nid) for nid in all_novels])
     user_array = np.array([user_encoded] * len(novel_array))
@@ -145,6 +152,10 @@ def recommend_based_on_novel():
     if novel_encoded == -1:
         return jsonify({'error': 'Novel ID not found'}), 404
 
+    global model
+    if model is None:
+        model = tf.keras.models.load_model(model_path)
+
     novel_embeddings = model.get_layer('novel_embedding_gmf').get_weights()[0]
     selected_novel_embedding = novel_embeddings[novel_encoded]
     similarities = np.dot(novel_embeddings, selected_novel_embedding) / (np.linalg.norm(novel_embeddings, axis=1) * np.linalg.norm(selected_novel_embedding))
@@ -171,5 +182,3 @@ def index():
 
 if __name__ == '__main__':
     app.run(port=5000)
-
-
