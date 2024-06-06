@@ -14,19 +14,19 @@ import nltk
 from nltk.corpus import stopwords
 from utils.build_model import train_and_save_model
 from config.config import Config
-
+from flask_cors import CORS
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 app.config.from_object(Config)
-
+CORS(app)
 # MongoDB configuration
 client = MongoClient(app.config['MONGO_URI'])
 db = client[app.config['DB_NAME']]
 novels_collection = db['novels']
 categories_collection = db['categories']
-
+comments_collection = db['comments']
 
 # Load mappings from JSON
 MODEL_DIR = 'models'
@@ -114,7 +114,9 @@ def recommend():
         return jsonify({'error': 'Invalid User ID format'}), 400
 
     if user_encoded == -1:
-        return jsonify({'error': 'User ID not found'}), 404
+        account_data = comments_collection.aggregate([{'$sample': {'size': 1}}, {'$project': {'_id': 0, 'account': 1}}]).next()
+        user_id = account_data['account']
+        user_encoded = encode_id(user_id_to_label, user_id)
 
     all_novels = list(novel_id_to_label.keys())
     novel_array = np.array([encode_id(novel_id_to_label, nid) for nid in all_novels])
@@ -125,7 +127,7 @@ def recommend():
     novel_predictions = list(zip(all_novels, predictions.flatten()))
     novel_predictions.sort(key=lambda x: x[1], reverse=True)
     top_novels = novel_predictions[:50]
-    recommended_novels = [{'novel_id': int(nid), 'predicted_rating': float(rating)} for nid, rating in top_novels]
+    recommended_novels = [{'novel_id': nid, 'predicted_rating': float(rating)} for nid, rating in top_novels]
 
     return jsonify(recommended_novels)
 
