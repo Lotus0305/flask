@@ -27,6 +27,7 @@ db = client[app.config['DB_NAME']]
 novels_collection = db['novels']
 categories_collection = db['categories']
 
+
 # Load mappings from JSON
 MODEL_DIR = 'models'
 with open(os.path.join(MODEL_DIR, 'user_id_to_label.json'), 'r') as file:
