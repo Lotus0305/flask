@@ -19,9 +19,6 @@ import tensorflow as tf
 nltk.download('stopwords')
 stop_words = set(stopwords.words('english'))
 
-# Disable oneDNN custom operations
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
 # Load environment variables
 load_dotenv()
 
@@ -48,6 +45,9 @@ with open(os.path.join(MODEL_DIR, 'category_id_to_label.json'), 'r') as file:
 
 model_path = os.path.join(MODEL_DIR, 'recommendation_model_with_description.h5')
 
+# Load the trained model
+model = tf.keras.models.load_model(model_path)
+
 # Function to convert IDs using JSON mapping
 def encode_id(mapping, original_id):
     return mapping.get(str(original_id), -1)  # Return -1 if ID not found
@@ -56,117 +56,99 @@ def decode_id(mapping, encoded_id):
     reverse_mapping = {v: k for k, v in mapping.items()}
     return reverse_mapping.get(encoded_id, None)
 
-# Utility function for preprocessing descriptions
-def preprocess_description(description):
-    description = description.lower()
-    description = re.sub(r'[^a-zA-Z0-9\s]', '', description)
-    description = re.sub(r'\s+', ' ', description).strip()
-    words = description.split()
-    filtered_description = ' '.join([word for word in words if word not in stop_words])
-    return filtered_description
+# Preprocess text function
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'<.*?>', '', text)
+    text = re.sub(r'[^\w\s]', '', text)
+    text = ' '.join([word for word in text.split() if word not in stop_words])
+    return text
 
-# Function to compute embedding using TF-IDF
-def compute_embedding(tfidf, row):
-    preprocessed_description = preprocess_description(row['description'])
-    combined_text = f"{row['name']} {row['author']} {row['category']} {preprocessed_description}"
-    return tfidf.transform([combined_text]).toarray()[0]
+# Load the TF-IDF vectorizer used during model training
+tfidf = TfidfVectorizer(max_features=64)
 
-# Endpoint to compute and store embeddings for novels
-@app.route('/compute_embeddings', methods=['POST'])
-def compute_and_store_embeddings():
-    novels_df = pd.DataFrame(list(novels_collection.find({}, {"_id": 1, "name": 1, "author": 1, "category": 1, "description": 1})))
-    combined_texts = novels_df.apply(lambda row: f"{row['name']} {row['author']} {row['category']} {preprocess_description(row['description'])}", axis=1)
-    
-    tfidf = TfidfVectorizer(max_features=512)  # Adjust the max_features according to your requirements
-    tfidf_matrix = tfidf.fit_transform(combined_texts)
-
-    novels_df['combined_embedding'] = list(tfidf_matrix.toarray())
-    novels_df.to_pickle('models/novels_with_combined_embeddings.pkl')
-    return jsonify({'status': 'Embeddings computed and stored successfully'}), 200
-
-# Endpoint to search for novels based on text query
-@app.route('/search_novel', methods=['GET'])
-def search_novel():
-    query = request.args.get('query')
-    if not query:
-        return jsonify({'error': 'Query is required'}), 400
-
-    novels_df = pd.read_pickle('models/novels_with_combined_embeddings.pkl')
-    tfidf = TfidfVectorizer(max_features=512)  # Ensure the vectorizer is consistent with the one used during embedding
-    tfidf_matrix = tfidf.fit_transform(novels_df['combined_embedding'].apply(lambda x: ' '.join(map(str, x))))
-
-    query_embedding = tfidf.transform([query]).toarray()
-    novels_embeddings = tfidf_matrix.toarray()
-    similarities = cosine_similarity(query_embedding, novels_embeddings)
-    top_k_indices = similarities[0].argsort()[-10:][::-1]  # Limit to top 10 results
-    results = novels_df.iloc[top_k_indices]
-    results['category'] = results['category'].apply(lambda x: category_id_to_label[str(x)])
-    
-    result_list = results[['category', 'name']].to_dict(orient='records')
-    for i, result in enumerate(result_list):
-        result['_id'] = str(results.iloc[i]['_id'])
-
-    return jsonify(result_list)
+# Load novels data
+novels = pd.DataFrame(list(novels_collection.find()))
+novels['description'] = novels['description'].apply(preprocess_text)
+novels['combined'] = novels['description'] + " " + novels['name'] + " " + novels['category'].astype(str)
+tfidf.fit(novels['combined'])
 
 # Endpoint to recommend novels based on user ID
 @app.route('/recommend', methods=['GET'])
 def recommend():
     user_id = request.args.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'User ID is required'}), 400
-    try:
-        user_encoded = encode_id(user_id_to_label, user_id)
-    except ValueError:
-        return jsonify({'error': 'Invalid User ID format'}), 400
-
-    if user_encoded == -1:
-        account_data = comments_collection.aggregate([{'$sample': {'size': 1}}, {'$project': {'_id': 0, 'account': 1}}]).next()
-        user_id = account_data['account']
-        user_encoded = encode_id(user_id_to_label, user_id)
-
-    global model
-    if model is None:
-        model = tf.keras.models.load_model(model_path)
+    encoded_user_id = encode_id(user_id_to_label, user_id)
     
-    all_novels = list(novel_id_to_label.keys())
-    novel_array = np.array([encode_id(novel_id_to_label, nid) for nid in all_novels])
-    user_array = np.array([user_encoded] * len(novel_array))
-    category_array = np.zeros(len(novel_array))  # Placeholder if categories are not used in prediction
+    if encoded_user_id == -1:
+        return jsonify({'error': 'User ID not found'}), 400
 
-    predictions = model.predict([user_array, novel_array, category_array])
-    novel_predictions = list(zip(all_novels, predictions.flatten()))
-    novel_predictions.sort(key=lambda x: x[1], reverse=True)
-    top_novels = novel_predictions[:50]
-    recommended_novels = [{'novel_id': nid, 'predicted_rating': float(rating)} for nid, rating in top_novels]
+    all_novel_ids = novels['_id'].unique()
+    rated_novel_ids = comments_collection.find({'account': user_id}, {'novel': 1})
+    rated_novel_ids = [comment['novel'] for comment in rated_novel_ids]
+    novel_ids_to_rate = np.setdiff1d(all_novel_ids, rated_novel_ids)
 
-    return jsonify(recommended_novels)
+    user_input = np.full(len(novel_ids_to_rate), encoded_user_id)
+    novel_input = np.array([encode_id(novel_id_to_label, str(nid)) for nid in novel_ids_to_rate])
+    category_input = novels.set_index('_id').loc[novel_ids_to_rate, 'category'].values
+    category_input = np.array([encode_id(category_id_to_label, cid) for cid in category_input])
+    description_input = tfidf.transform(novels.set_index('_id').loc[novel_ids_to_rate, 'description']).toarray()
+
+    predicted_ratings = model.predict([user_input, novel_input, category_input, description_input])
+    top_n_indices = np.argsort(predicted_ratings[:, 0])[-10:][::-1]
+    top_n_novel_ids = novel_ids_to_rate[top_n_indices]
+    top_n_novel_names = novels.set_index('_id').loc[top_n_novel_ids, 'name'].values
+
+    recommendations = [{"id": str(nid), "name": name} for nid, name in zip(top_n_novel_ids, top_n_novel_names)]
+    
+    return jsonify(recommendations)
 
 # Endpoint to recommend novels based on a specific novel's ID
 @app.route('/recommend_based_on_novel', methods=['GET'])
 def recommend_based_on_novel():
     novel_id = request.args.get('novel_id')
-    if not novel_id:
-        return jsonify({'error': 'Novel ID is required'}), 400
-    try:
-        novel_encoded = encode_id(novel_id_to_label, novel_id)
-    except ValueError:
-        return jsonify({'error': 'Invalid Novel ID format'}), 400
+    encoded_novel_id = encode_id(novel_id_to_label, novel_id)
+    
+    if encoded_novel_id == -1:
+        return jsonify({'error': 'Novel ID not found'}), 400
 
-    if novel_encoded == -1:
-        return jsonify({'error': 'Novel ID not found'}), 404
+    novel_embedding = get_novel_embedding(encoded_novel_id)
+    all_novel_ids = novels['_id'].unique()
+    other_novel_ids = np.setdiff1d(all_novel_ids, [novel_id])
 
-    global model
-    if model is None:
-        model = tf.keras.models.load_model(model_path)
+    similarities = []
+    for other_novel_id in other_novel_ids:
+        other_encoded_novel_id = encode_id(novel_id_to_label, str(other_novel_id))
+        other_novel_embedding = get_novel_embedding(other_encoded_novel_id)
+        similarity = cosine_similarity([novel_embedding], [other_novel_embedding])[0][0]
+        similarities.append((other_novel_id, similarity))
+    
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    top_n_novel_ids = [sim[0] for sim in similarities[:10]]
+    top_n_novel_names = novels.set_index('_id').loc[top_n_novel_ids, 'name'].values
+    
+    recommendations = [{"id": str(nid), "name": name} for nid, name in zip(top_n_novel_ids, top_n_novel_names)]
+    
+    return jsonify(recommendations)
 
-    novel_embeddings = model.get_layer('novel_embedding_gmf').get_weights()[0]
-    selected_novel_embedding = novel_embeddings[novel_encoded]
-    similarities = np.dot(novel_embeddings, selected_novel_embedding) / (np.linalg.norm(novel_embeddings, axis=1) * np.linalg.norm(selected_novel_embedding))
-    top_n_indices = similarities.argsort()[-11:][::-1]
-    top_novels = [(int(decode_id(novel_id_to_label, idx)), float(similarities[idx])) for idx in top_n_indices if idx != novel_encoded]
-    recommended_novels = [{'novel_id': novel_id, 'similarity_score': score} for novel_id, score in top_novels]
+@app.route('/search_novel', methods=['GET'])
+def search_novel():
+    query = request.args.get('query')
+    preprocessed_query = preprocess_text(query)
+    query_tfidf = tfidf.transform([preprocessed_query])
+    
+    novels['similarity'] = cosine_similarity(tfidf.transform(novels['combined']), query_tfidf).flatten()
+    top_novels = novels.sort_values(by='similarity', ascending=False).head(10)
+    
+    results = [{"id": str(novel['_id']), "name": novel['name']} for _, novel in top_novels.iterrows()]
+    
+    return jsonify(results)
 
-    return jsonify(recommended_novels)
+def get_novel_embedding(novel_id):
+    novel_embedding_gmf = model.get_layer('novel_embedding_gmf').get_weights()[0][novel_id]
+    novel_embedding_mlp = model.get_layer('novel_embedding_mlp').get_weights()[0][novel_id]
+    novel_embedding = np.concatenate((novel_embedding_gmf, novel_embedding_mlp))
+    return novel_embedding
 
 # Endpoint to retrain the model
 @app.route('/train', methods=['POST'])
