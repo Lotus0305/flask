@@ -7,8 +7,3 @@
 
 [build.environment]
   FLASK_ENV = "production"
-
-[[redirects]]
-  from = "/*"
-  to = "templates/index.html"
-  status = 200
