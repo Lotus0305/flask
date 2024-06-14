@@ -18,7 +18,6 @@ from sklearn.utils.class_weight import compute_class_weight
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import nltk
-import streamlit as st
 
 # Download NLTK resources
 nltk.download('stopwords')
@@ -27,9 +26,9 @@ stop_words = set(stopwords.words('english'))
 
 load_dotenv()
 
-# Load secrets from secrets.toml
-MONGO_URI = st.secrets["mongodb"]["MONGO_URI"]
-DB_NAME = st.secrets["mongodb"]["DB_NAME"]
+# Load environment variables
+MONGO_URI = os.getenv('MONGO_URI')
+DB_NAME = os.getenv('DB_NAME')
 
 # Connect to MongoDB
 client = MongoClient(MONGO_URI)
