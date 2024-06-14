@@ -1,29 +1,37 @@
 import os
 from flask import Flask, request, jsonify, render_template
-import tensorflow as tf
 import numpy as np
 import json
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
 import pandas as pd
-import torch
 import re
 import nltk
 from nltk.corpus import stopwords
 from utils.build_model import train_and_save_model
 from config.config import Config
 from flask_cors import CORS
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Load stopwords
+nltk.download('stopwords')
+stop_words = set(stopwords.words('english'))
+
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+import tensorflow as tf
+
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 app.config.from_object(Config)
 CORS(app)
+
 # MongoDB configuration
 client = MongoClient(app.config['MONGO_URI'])
 db = client[app.config['DB_NAME']]
+
 novels_collection = db['novels']
 categories_collection = db['categories']
 comments_collection = db['comments']
@@ -37,15 +45,9 @@ with open(os.path.join(MODEL_DIR, 'novel_id_to_label.json'), 'r') as file:
 with open(os.path.join(MODEL_DIR, 'category_id_to_label.json'), 'r') as file:
     category_id_to_label = json.load(file)
 
-model_path = os.path.join(MODEL_DIR, 'recommendation_model.h5')
-model = tf.keras.models.load_model(model_path)
+model_path = os.path.join(MODEL_DIR, 'recommendation_model_with_description.h5')
+model = None
 
-# Load SentenceTransformer model
-sentence_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-
-# Load stopwords
-nltk.download('stopwords')
-stop_words = set(stopwords.words('english'))
 
 # Function to convert IDs using JSON mapping
 def encode_id(mapping, original_id):
@@ -64,18 +66,22 @@ def preprocess_description(description):
     filtered_description = ' '.join([word for word in words if word not in stop_words])
     return filtered_description
 
-# Function to compute embedding using SentenceTransformer
-def compute_embedding(row):
+# Function to compute embedding using TF-IDF
+def compute_embedding(tfidf, row):
     preprocessed_description = preprocess_description(row['description'])
     combined_text = f"{row['name']} {row['author']} {row['category']} {preprocessed_description}"
-    return sentence_model.encode(combined_text, convert_to_tensor=True)
+    return tfidf.transform([combined_text]).toarray()[0]
 
 # Endpoint to compute and store embeddings for novels
 @app.route('/compute_embeddings', methods=['POST'])
 def compute_and_store_embeddings():
     novels_df = pd.DataFrame(list(novels_collection.find({}, {"_id": 1, "name": 1, "author": 1, "category": 1, "description": 1})))
-    novels_df['combined_embedding'] = novels_df.apply(compute_embedding, axis=1)
-    novels_df['combined_embedding'] = novels_df['combined_embedding'].apply(lambda x: x.tolist())
+    combined_texts = novels_df.apply(lambda row: f"{row['name']} {row['author']} {row['category']} {preprocess_description(row['description'])}", axis=1)
+    
+    tfidf = TfidfVectorizer(max_features=512)  # Adjust the max_features according to your requirements
+    tfidf_matrix = tfidf.fit_transform(combined_texts)
+
+    novels_df['combined_embedding'] = list(tfidf_matrix.toarray())
     novels_df.to_pickle('models/novels_with_combined_embeddings.pkl')
     return jsonify({'status': 'Embeddings computed and stored successfully'}), 200
 
@@ -87,10 +93,13 @@ def search_novel():
         return jsonify({'error': 'Query is required'}), 400
 
     novels_df = pd.read_pickle('models/novels_with_combined_embeddings.pkl')
-    query_embedding = sentence_model.encode(query, convert_to_tensor=True)
-    novels_embeddings = torch.tensor(novels_df['combined_embedding'].tolist())
-    similarities = cosine_similarity(query_embedding.unsqueeze(0), novels_embeddings)
-    top_k_indices = similarities.argsort()[0][-10:][::-1]  # Limit to top 10 results
+    tfidf = TfidfVectorizer(max_features=512)  # Ensure the vectorizer is consistent with the one used during embedding
+    tfidf_matrix = tfidf.fit_transform(novels_df['combined_embedding'].apply(lambda x: ' '.join(map(str, x))))
+
+    query_embedding = tfidf.transform([query]).toarray()
+    novels_embeddings = tfidf_matrix.toarray()
+    similarities = cosine_similarity(query_embedding, novels_embeddings)
+    top_k_indices = similarities[0].argsort()[-10:][::-1]  # Limit to top 10 results
     results = novels_df.iloc[top_k_indices]
     results['category'] = results['category'].apply(lambda x: category_id_to_label[str(x)])
     
@@ -105,8 +114,6 @@ def search_novel():
 def recommend():
     user_id = request.args.get('user_id')
     if not user_id:
-        return jsonify
-    if not user_id:
         return jsonify({'error': 'User ID is required'}), 400
     try:
         user_encoded = encode_id(user_id_to_label, user_id)
@@ -118,6 +125,10 @@ def recommend():
         user_id = account_data['account']
         user_encoded = encode_id(user_id_to_label, user_id)
 
+    global model
+    if model is None:
+        model = tf.keras.models.load_model(model_path)
+    
     all_novels = list(novel_id_to_label.keys())
     novel_array = np.array([encode_id(novel_id_to_label, nid) for nid in all_novels])
     user_array = np.array([user_encoded] * len(novel_array))
@@ -130,6 +141,8 @@ def recommend():
     recommended_novels = [{'novel_id': nid, 'predicted_rating': float(rating)} for nid, rating in top_novels]
 
     return jsonify(recommended_novels)
+
+
 
 # Endpoint to recommend novels based on a specific novel's ID
 @app.route('/recommend_based_on_novel', methods=['GET'])
@@ -144,6 +157,10 @@ def recommend_based_on_novel():
 
     if novel_encoded == -1:
         return jsonify({'error': 'Novel ID not found'}), 404
+
+    global model
+    if model is None:
+        model = tf.keras.models.load_model(model_path)
 
     novel_embeddings = model.get_layer('novel_embedding_gmf').get_weights()[0]
     selected_novel_embedding = novel_embeddings[novel_encoded]
@@ -167,9 +184,7 @@ def health_check():
 
 @app.route('/')
 def index():
-  return render_template('index.html')
+    return render_template('index.html')
 
 if __name__ == '__main__':
     app.run(port=5000)
-
-
