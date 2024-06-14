@@ -1,6 +1,6 @@
-flask>=2.0.0
+flask
 flask_cors
-gunicorn>=20.1.0
+gunicorn
 tensorflow
 joblib
 numpy
@@ -11,4 +11,4 @@ scikit-learn
 sentence-transformers
 torch
 nltk
-
+setuptools
