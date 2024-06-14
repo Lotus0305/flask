@@ -14,6 +14,7 @@ from config.config import Config
 from flask_cors import CORS
 from sklearn.feature_extraction.text import TfidfVectorizer
 import tensorflow as tf
+import streamlit as st
 
 # Load stopwords
 nltk.download('stopwords')
@@ -27,9 +28,14 @@ app = Flask(__name__)
 app.config.from_object(Config)
 CORS(app)
 
-# MongoDB configuration
-client = MongoClient(app.config['MONGO_URI'])
-db = client[app.config['DB_NAME']]
+# Load secrets from secrets.toml
+MONGO_URI = st.secrets["mongodb"]["MONGO_URI"]
+DB_NAME = st.secrets["mongodb"]["DB_NAME"]
+
+# Connect to MongoDB
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+
 novels_collection = db['novels']
 categories_collection = db['categories']
 comments_collection = db['comments']

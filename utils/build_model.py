@@ -18,6 +18,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 import nltk
+import streamlit as st
 
 # Download NLTK resources
 nltk.download('stopwords')
@@ -26,9 +27,9 @@ stop_words = set(stopwords.words('english'))
 
 load_dotenv()
 
-# Load environment variables
-MONGO_URI = os.getenv('MONGO_URI')
-DB_NAME = os.getenv('DB_NAME')
+# Load secrets from secrets.toml
+MONGO_URI = st.secrets["mongodb"]["MONGO_URI"]
+DB_NAME = st.secrets["mongodb"]["DB_NAME"]
 
 # Connect to MongoDB
 client = MongoClient(MONGO_URI)
@@ -38,7 +39,6 @@ comments_collection = db['comments']
 novels_collection = db['novels']
 
 def preprocess_text(text):
-    lemmatizer = WordNetLemmatizer()
     text = text.lower()
     text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
     text = re.sub(r'<.*?>', '', text)

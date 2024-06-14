@@ -12,3 +12,4 @@ sentence-transformers
 torch
 nltk
 setuptools
+streamlit
