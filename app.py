@@ -13,17 +13,19 @@ from utils.build_model import train_and_save_model
 from config.config import Config
 from flask_cors import CORS
 from sklearn.feature_extraction.text import TfidfVectorizer
+import tensorflow as tf
 
 # Load stopwords
 nltk.download('stopwords')
 stop_words = set(stopwords.words('english'))
 
+# Disable oneDNN custom operations
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-import tensorflow as tf
 
 # Load environment variables
 load_dotenv()
 
+# Flask app setup
 app = Flask(__name__)
 app.config.from_object(Config)
 CORS(app)
@@ -31,7 +33,6 @@ CORS(app)
 # MongoDB configuration
 client = MongoClient(app.config['MONGO_URI'])
 db = client[app.config['DB_NAME']]
-
 novels_collection = db['novels']
 categories_collection = db['categories']
 comments_collection = db['comments']
@@ -46,8 +47,6 @@ with open(os.path.join(MODEL_DIR, 'category_id_to_label.json'), 'r') as file:
     category_id_to_label = json.load(file)
 
 model_path = os.path.join(MODEL_DIR, 'recommendation_model_with_description.h5')
-model = None
-
 
 # Function to convert IDs using JSON mapping
 def encode_id(mapping, original_id):
@@ -141,8 +140,6 @@ def recommend():
     recommended_novels = [{'novel_id': nid, 'predicted_rating': float(rating)} for nid, rating in top_novels]
 
     return jsonify(recommended_novels)
-
-
 
 # Endpoint to recommend novels based on a specific novel's ID
 @app.route('/recommend_based_on_novel', methods=['GET'])
