@@ -1,0 +1,15 @@
+[build]
+  command = "pip install -r requirements.txt"
+  publish = "static"
+
+[context.production.environment]
+  WEB_CONCURRENCY = 3
+  PORT = 5000
+
+[build.environment]
+  FLASK_ENV = "production"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
